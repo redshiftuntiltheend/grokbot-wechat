@@ -77,6 +77,33 @@
 - 判断成功不能看 HTTP 状态码：iLink 拒绝时也返回 200，要看 JSON 里的 `ret` / `errcode`。
 - 只有发送成功的文本才写进 `history.log`。
 
+### 出站图片（独立命令）
+文字仍只用 `send.py`。图片用另一条命令，失败不会进入 `outbox.json`，也不会改走文字发送：
+
+```bash
+python3 send_image.py /绝对路径/图片.jpg --reply-to-ms <trigger_ms>
+```
+
+- 不附带文字说明。要配字就另外调用 `send.py`（它自己再做一次 `--reply-to-ms` 判断）。
+- 收件人固定是 `credentials.json` 里的 `ilink_user_id`。`--to` 可以省略；如果写了，必须和这个 id 相同，否则直接拒绝。这和 `send.py`「默认发给最后说话的人」不同，避免图片被送到一个意外的 `from_user_id`。
+- `--no-context` 与文字命令一样，不带 `context_token`。
+- 本地校验：必须是普通文件（拒绝符号链接和硬链接到凭证/状态/历史文件）、扩展名只允许 `.jpg` `.jpeg` `.png` `.gif` `.webp` 且与文件头一致、空文件拒绝、大于 20 MiB 拒绝。20 MiB 是本桥的上限，不是腾讯文档里的限额。
+- 流程与腾讯公开客户端一致：明文 MD5 和 PKCS#7 后的长度交给 `ilink/bot/getuploadurl`（`media_type=1`、`no_need_thumb=true`、`aeskey` 为 16 字节密钥的 hex），密文以 `Content-Type: application/octet-stream` POST 到 CDN，成功看响应头 `x-encrypted-param`。`sendmessage` 里图片项的 `media.aes_key` 是 **hex 字符串的 base64**（不是原始 16 字节的 base64），`mid_size` 是密文字节数，`encrypt_type` 为 1。
+- CDN 请求不带 Bot `Authorization`。`getuploadurl` / `sendmessage` 仍走原来的 Bot token。上传 URL 只允许 `https`，默认主机 `novac2c.cdn.weixin.qq.com`（可用 `WECHAT_CDN_HOST_ALLOWLIST` 增加精确主机名）。服务端若返回这份名单以外的 CDN 主机，会失败关闭、不会发图。
+- `--reply-to-ms` 的取代判断和 `send.py` 相同（`last_inbound_ms > reply_to_ms + 500`），并且在 **开始上传之前** 和 **调用 sendmessage 之前** 各查一次。被取代则 exit 4，不发图。
+- CDN 上传：HTTP 4xx 或重定向不重试；其他上传失败最多 3 次（与公开客户端一致）。`sendmessage` **从不**因为超时、非 JSON、空响应或连接错误而自动再发一次。
+- 同一文件内容、同一绑定用户、同一个 `--reply-to-ms`（再加上可选的 `--idempotency-key`）在已经发出、被拒绝，或结果不明之后，再次执行会被本地账本拦住。账本 `image_send_ledger.json` 只记状态和 `client_id`，不记密钥和上传参数，权限 600。要故意再发同一张图，换一个 `--idempotency-key`，或换一次新的 `--reply-to-ms`。
+- 退出码：`0` 已发送；`1` 校验或上传失败（微信消息还没发，修好原因后可以再试）；`2` 功能已关；`4` SUPERSEDED；`5` 不要重试。
+
+关闭图片发送（不用改代码，也不用重启转发器；`send_image.py` 每次启动时读环境变量）：
+
+```bash
+WECHAT_OUTBOUND_IMAGE=0 python3 send_image.py /绝对路径/图片.jpg
+# 或写进运行该命令的环境：WECHAT_OUTBOUND_IMAGE=0
+```
+
+回滚：不要再调用 `send_image.py`。`send.py` 的文字行为没有改。删掉 `send_image.py` 和 `image_send.py` 即可去掉功能。不要为此重启轮询，也不要覆盖部署机器上改过的 `.venv/` 或 `run_forward.sh`。
+
 ### 24 小时推送窗口 + keep-alive nudge + 免打扰
 微信只允许 bot 在用户最后一次发言后的一段时间内主动发消息（实测 11h 能发、35h 失败，按 ~24h 处理）。
 所以 `outbox.py` 在窗口快关时发一条很短的续期提醒（文案可在 `NUDGE_TEXT` 改）：
@@ -141,7 +168,8 @@ cp .env.example .env            # 先空着 webhook，下一步再填
 |---|---|
 | `forward.py` | 常驻转发器：轮询、去重、媒体、批处理 POST、outbox 线程 |
 | `outbox.py` | 推送失败排队 / 补发、keep-alive nudge、免打扰 |
-| `send.py` | agent 用的发送命令（可打断、排队）|
+| `send.py` | agent 用的文字发送命令（可打断、排队）|
+| `send_image.py` / `image_send.py` | 出站图片（独立于文字队列；可关闭）|
 | `ilink.py` | 最小 iLink 客户端（`post` / `send_text` / state 读写）|
 | `media.py` | 媒体摘要、CDN 下载、AES 解密 |
 | `history.py` | 滚动对话记录 `history.log`（2000 行时截到 1000）|
@@ -181,6 +209,7 @@ cp .env.example .env            # 先空着 webhook，下一步再填
 13. **补发和 nudge 都不带 `context_token`**（`context_token=""`），旧 token 隔了很久可能失效；实测不带也能发。
 14. **绑定**：二维码会过期（自动刷新，最多 `MAX_REFRESH` 次）；可能返回 `scaned_but_redirect`，要改用 `redirect_host`；可能要求输入手机上显示的数字（`need_verifycode`）。
 15. **Webhook 重试**：4xx（除 408/429）是配置错（URL / key 不对），重试没用，直接放弃并保留 pending，修好配置后重启即可补发。
+16. **出站图片不要进文字 outbox**：图片上传或 `sendmessage` 失败时如果再排队成文字，用户会收到路径或一堆乱重试。`send_image.py` 失败只返回退出码；exit 5 不要重试，否则可能发出两张同样的图。
 
 ---
 
@@ -192,10 +221,13 @@ webhook routine, so WeChat becomes a chat front-end for your agent.
 - **Inbound**: `forward.py` long-polls `ilink/bot/getupdates`, dedupes, downloads + AES-128-ECB-decrypts media from the
   WeChat CDN, buffers messages in a disk-backed `pending.json`, and POSTs them as **one batch** once you pause (3s) or after 60s,
   together with the last 40 lines of a stitched `history.log` (each webhook run is a fresh agent run).
-- **Outbound**: the agent replies with `send.py "text" --reply-to-ms <trigger_ms>`. If you've sent something newer
+- **Outbound text**: the agent replies with `send.py "text" --reply-to-ms <trigger_ms>`. If you've sent something newer
   meanwhile, it exits **4 (SUPERSEDED)** and sends nothing — replies are interruptible. If WeChat refuses (the ~24h
   push window since your last message has closed; note iLink still returns HTTP 200, check `ret`/`errcode`), the text
   is queued in `outbox.json` (exit **3**) and auto-sent right after you next write.
+- **Outbound image**: `send_image.py /path/to.jpg --reply-to-ms <trigger_ms>` uploads one AES-encrypted image and sends
+  it as its own message. It never uses the text outbox. Exit **4** is superseded; exit **5** means do not retry.
+  `WECHAT_OUTBOUND_IMAGE=0` disables it without restarting the forwarder.
 - **Keep-alive nudge**: one short "reply 1 to renew" message 18–23h after your last message, never during quiet
   hours (00:00–07:59 Beijing); if that slot is all quiet hours, it's sent early (≥12h) 30 min before quiet hours start.
   A bare "1" gets a `context_note` so the agent just acks it.

@@ -6,6 +6,7 @@ Auto-refreshes QR (overwrites qr.png) on expiry. If phone shows a number (need_v
 write it into verify_code.txt in this dir."""
 import json, os, sys, time, urllib.request, urllib.parse, datetime
 import qrcode
+from ilink import urlopen_no_redirect
 
 BASE = "https://ilinkai.weixin.qq.com"
 from config import DATA_DIR as DIR   # credentials.json / qr.png land here
@@ -18,7 +19,7 @@ def log(*a):
 
 def req(url, data=None, timeout=40):
     r = urllib.request.Request(url, data=data, headers=HDRS, method="POST" if data else "GET")
-    with urllib.request.urlopen(r, timeout=timeout) as f:
+    with urlopen_no_redirect(r, timeout=timeout) as f:
         return json.loads(f.read().decode())
 
 def new_qr():

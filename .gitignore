@@ -14,6 +14,9 @@ pending.json
 pending.json.tmp
 outbox.json
 outbox.json.tmp
+image_send_ledger.json
+image_send_ledger.json.tmp
+image_send_ledger.lock
 forward_seen.json
 history.log
 forward.heartbeat
