@@ -2,6 +2,8 @@
 
 这次只在用户自己的 fork 上提交。不要推到 `Tencent/openclaw-weixin`，也不要在没经使用者再次确认时发真实图片或重启转发器。
 
+数据外传结论见 `SECURITY_REVIEW.md`：这份源码里没有发现作者控制的接收端。生产目录的 `.venv` 和 `run_forward.sh` 不在那次阅读范围内，所以不能用这份结论代替对正在运行的那份拷贝的检查。上线前在机器上核对 `WECHAT_WEBHOOK_URL`、凭证里的 `baseurl` 和 `https_proxy`，不要把这些值贴出来。
+
 生产机上的 `/workspace/grokbot-wechat` 有改过的 `.venv/` 和 `run_forward.sh`，这份仓库看不到那些改动。不要假设生产目录和这里的 `main` 一样。
 
 ## 不要覆盖

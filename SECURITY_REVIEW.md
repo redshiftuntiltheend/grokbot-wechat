@@ -1,162 +1,90 @@
-# 安全审查：现有微信桥与这次的出站图片
+# 数据外传审查：上游作者或 fork 相关方能否拿走消息、图片、凭证
 
-审查对象是本仓库当前代码（社区桥 `grokbot-wechat`），加上本次未上线的出站图片实现。只读了源码和腾讯公开文档。没有读取生产机上的 `credentials.json`、`.env`、聊天日志或附件，没有连接微信，没有上传 CDN，没有重启进程。
+审查范围是本仓库这份源码（含这次的出站图片）。没有打开生产机上的凭证、`.env` 或聊天日志，没有联网发图，没有部署。这是静态阅读，**不能保证**没被审到的文件、已安装的依赖或生产目录里另有外传。
 
-这不是渗透测试，也不是对运行中进程的检查。下面把「代码里能直接看到的行为」「要出问题还缺什么前提」「这次看不到的运行时设置」分开写。
+## 直接回答
 
-## 给使用者的结论
+**在这份源码里，没有发现把文字、图片或凭证发给上游作者或 fork 相关第三方的证据。** 没有写死的作者域名、没有遥测、没有远程拉代码、跟踪文件里也没有嵌入的真实 token 或 webhook。
 
-不能把这个桥说成安全，也不能说没有风险。它不是腾讯官方客户端，腾讯公开仓库也没有为这个 Python 转发器背书。
+把仓库 fork 到 GitHub，**不会**让上游因此读到你机器上正在跑的消息或 `credentials.json`。上游能看到的是公开的源代码（如果仓库是公开的）。运行时数据留在跑程序的那台机器上，除非程序自己把数据发出去。
 
-它会做三件你需要事先接受的事：本机长期保存能以你的 ClawBot 身份收发消息的 `bot_token`；把微信对话发到你自己配置的 webhook（设计上就是 Grok）；把同一份消息交给腾讯的 iLink / CDN 服务器。机器如果只有你能登录，而且 webhook 地址确实是你的 routine，它做的就是这条链路本身。webhook 填错、数据目录能被别人读、或者 agent 听信了微信里的指示，影响就不只是「多了一条聊天」。
+能把数据送走的，是另外三件事，而不是「fork」这个关系本身：
 
-这次只加了离线的出站图片。图片失败不会进文字队列，结果不清楚时不会自动再发，CDN 请求不带 Bot token，收件人必须是绑定的微信号。这些是代码里已经用假网络测过的限制。微信会不会接受这种图片消息，这次没有实机验证，所以不能把它说成已经能用。
+1. 代码或依赖里被放进恶意的发送逻辑（这份源码里没看到；生产 `.venv` 没审到）。
+2. 你自己的配置把目的地指到别处（`WECHAT_WEBHOOK_URL`、代理、CDN 白名单）。这次读不到生产环境里的值。
+3. 登录响应、`baseurl`、入站 `full_url`，或 HTTP 重定向给出一个不是腾讯的地址。代码会跟随其中一部分。这不是作者写死的地址，也没有证据表明腾讯会把流量转到作者。
 
-没有在腾讯当前中文 README，或本次读到的协议说明里，看到「用非官方程序就会封号」这类原话。社区博客写过有《微信 ClawBot 服务条款》，但条款正文没有取到。这里不推测封号概率。
+微信服务器和你配置的 Grok webhook 收到消息，是这条桥的用途，**不算**被作者偷走。下面把这两类分开。
 
-## 严重程度怎么读
+## 域名分类
 
-- **高**：代码路径已经成立，错误配置或一条恶意的入站字段就能把对话、密钥或本机请求送到意料之外的地方。
-- **中**：后果同样是泄密或误发，但还要另一个条件（别的本机用户、媒体下载失败、平台真的投递了别人的消息、agent 执行了正文里的指示）。
-- **低**：影响面窄，或只在本机运维场景里出现。
-- **设计内**：不是缺陷。用这个桥就一定会发生。
-
-## 设计内的数据流
-
-| 数据 | 去向 | 依据 |
+| 域名或目的地 | 分类 | 运行时会不会发用户数据 |
 |---|---|---|
-| 你发出和收到的微信内容 | 腾讯 iLink（`ilinkai.weixin.qq.com` 或凭证里的 `baseurl`） | `ilink.py` 的 `post()` |
-| 同一批消息，外加 `history.log` 最近 40 行 | `WECHAT_WEBHOOK_URL`，并附上 webhook 的 Bearer | `forward.py` `post_webhook()` |
-| 出站图片的明文 | 先在本机用 AES-128-ECB 加密；密钥通过 `getuploadurl` 交给腾讯，密文 POST 到 CDN | `image_send.py`；与腾讯 `upload.ts` / `send.ts` 相同的分工 |
+| `ilinkai.weixin.qq.com` | 预定接收方：微信 iLink。`bind.py` 第 10 行、`ilink.py` 第 29 行、`credentials.example.json` 的默认值 | 会。见下表。代码里的默认 API |
+| `novac2c.cdn.weixin.qq.com` | 预定接收方：微信 CDN。`media.py` 第 5 行、`image_send.py` 第 23–24 行 | 会。入站下载密文；出站只上传图片密文，不带 Bot token |
+| `WECHAT_WEBHOOK_URL` | 预定接收方，**仅当**它是你自己的 Grok routine。代码没有默认 URL，也没有网址白名单（`config.py` 第 31 行） | 会，发到你填的地址。未设置则不发（`forward.py` 第 22–25 行） |
+| `psylch/grokbot-wechat`、`chihao.li`、`Tencent/openclaw-weixin` | 文档和注释里的链接。README 第 148 行是给人看的 clone 地址 | **不会。** 桥进程不请求这些域名 |
+| `github.com/redshiftuntiltheend/grokbot-wechat` | 这个工作区的 git remote，只在 `git push` 时用到 | 桥进程不使用。push 出去的是源码，不是聊天记录 |
+| 凭证里的 `baseurl` | 登录响应写进 `credentials.json` 之后，`ilink.py` 第 29 行原样使用 | 若该值和默认不同，API 和 Bot token 会发到那个主机。源码没把它写成作者的域名 |
+| `redirect_host` | 扫码状态里的字段。`bind.py` 第 52–53 行拼成 `https://` + 主机 | 只会把二维码轮询发过去。这一步的请求头不含 `Authorization`（`bind.py` 第 12–13 行） |
+| 入站 `media.full_url` | 消息里带来的 URL。`media.py` 第 39–47 行原样 `urlopen` | 会向该 URL 发 GET。不附带凭证文件。URL 本身来自消息 |
+| `upload_full_url` | `getuploadurl` 的返回值。图片路径只接受允许列表里的 https 主机，并拒绝重定向 | 不在名单里就不会 POST 密文 |
+| `WECHAT_CDN_BASE` / `WECHAT_CDN_HOST_ALLOWLIST` | 运行环境覆盖，默认仍是上面的微信 CDN | 只有运行者自己改了才会扩大 |
+| `http_proxy` / `https_proxy` | 源码没写代理，但 `urllib` 默认会用环境变量 | 生产环境有没有代理，这次看不到。有的话，API 和 webhook 会经过该代理 |
 
-webhook 是第三方。它是不是「意料之外」，取决于 `.env` 里的 URL 是不是你的 Grok routine。代码没有网址白名单（`config.py` 第 31–46 行只是原样读取）。
+没有在可执行代码里找到 `x.ai`、`grok.com`、作者个人域名或分析服务的请求。
 
-## 已核实的问题
+## 每个出站调用带什么
 
-### 高 — 入站媒体 URL 没有协议和主机限制
+预定发给微信 API（`ilink.py` `post()`，`bind.py` 的二维码接口）：
 
-`media.py` 第 39–47 行：消息里如果带了 `media.full_url`，就原样交给 `urllib.request.urlopen`。没有要求 `https`，没有主机白名单，标准库还会跟随重定向。`file://` 和内网 `http://` 都在这个函数能打开的范围内。
-
-前提：`getupdates` 返回的媒体对象里，`full_url` 得由攻击者决定。普通微信用户能不能写入这个字段，公开协议没有说明，这次也不能从生产消息里验证。能改 API 响应的人（或中间人）则不需要这个未知条件。本补丁没有改入站下载。
-
-缓解：只允许 `https` 且主机是微信 CDN；拒绝重定向。那是入站改动，这次没做，避免影响现有收图。
-
-### 高 — 媒体下载失败时，解密材料会进 webhook
-
-`forward.py` 第 99–101 行：下载或解密失败时，把原始 item 放进 `raw_items`。原始 item 含 `aeskey` / `media.aes_key` 和 `encrypt_query_param`。同一次 POST 还会带上最近 40 行历史（`forward.py` 第 154–159 行）和 webhook Bearer（第 29–30 行）。
-
-前提：某次媒体下载失败，且 webhook 不是你完全信任的地址，或者那个地址的日志会被别人看到。成功下载的路径会在摘要里去掉 `media` 和 `aeskey`（`media.py` `summarize()`），失败路径没有这样做。
-
-缓解：失败时只给 agent 留错误码和消息 id，不要把密钥放进 payload。本次未改。
-
-### 中 — 聊天落盘文件没有收紧权限
-
-`credentials.json` 和 `state.json` 会 `chmod 600`（`bind.py` 第 46–48 行，`ilink.py` 第 17–20 行）。下面这些包含消息正文或用户 id 的文件，写入时没有改权限，实际模式等于进程的 umask：
-
-- `outbox.py` 第 26–29 行 `outbox.json`
-- `forward.py` 第 129–133 行 `pending.json`
-- `history.py` 第 37–44 行 `history.log`
-- `forward.py` 第 16–17 行 `forward.log`
-- `config.py` 第 27 行数据目录 `os.makedirs`，没有设成 `0700`
-
-前提：同一台机器上还有别的用户，且 umask 不是 `077`。生产机的 umask 和目录模式这次看不到。单用户、只有你能登录时，这和「agent 自己能读这些文件」是同一信任边界。
-
-`state.json` 虽然是 600，但 `forward.py` 会把最近 20 条原始消息放进 `raw_log`。拿到这个文件的人同时拿到 `context_token`。
-
-缓解：数据目录 `chmod 700`，启动转发器的环境使用 `umask 077`。不要用仓库里的 `run_forward.sh` 覆盖生产机上改过的脚本；要改只在现有脚本里加 umask。
-
-### 中 — 文字发送在结果不明时会排队再试
-
-`outbox.py` 第 41–48 行：`send_text` 抛异常，或响应不算成功，就把原文写入 `outbox.json`。`flush()`（第 50–59 行）之后会再发。超时发生在服务器已经收下消息时，用户会看到两条。`ilink.py` 第 45–50 行把空 JSON 或缺省 `ret` 当成成功，把非 JSON 当成失败并因此进入队列。
-
-这是现有文字行为，这次按要求没有改。图片走另一条路，失败不会调用 `enqueue`。
-
-### 中 — 文字收件人是「最后说话的那个人」
-
-`ilink.py` 第 38 行：没指定 `--to` 时，发给 `state.json` 的 `last_from_user_id`，否则才是凭证里的 `ilink_user_id`。`forward.py` 第 64–65 行会用任何 `message_type == 1` 的 `from_user_id` 更新这个值。代码没有检查发送者是不是绑定用户。
-
-前提：微信是否会把别人的消息投递到这个 ClawBot。chihao.li 的协议笔记写的是一个 ClawBot 绑定一个微信号，但没有证明别人不能发消息进来。这个前提未验证。
-
-图片命令不跟随 `last_from_user_id`。`--to` 必须等于 `ilink_user_id`，否则拒绝（`image_send.py` `resolve_recipient`）。文字命令保持原样。
-
-### 中 — 微信正文会进入 agent 的指令
-
-`routines/inbound-webhook.md` 让模型阅读 `messages` 和 `history` 并调用本机命令。JSON 能防止撑破报文，不能防止模型把正文当成指示。出站图片让这种指示可以上传本机文件。图片侧已限制：只能是通过校验的图片、不能是凭证文件或其硬链接、收件人只能是绑定用户。通过校验的其他图片，agent 仍然发得出去。
-
-### 中 — API 地址来自登录响应，没有主机白名单
-
-`bind.py` 第 52–53 行把 `redirect_host` 拼进 `https://`。扫码轮询的请求头（第 12–13 行）不含 `Authorization`，所以这一步不会把已有 token 送出去。确认之后，`ilink.py` 第 29 行用凭证里的 `baseurl` 发送 Bearer。恶意的确认响应，或事后改过的 `credentials.json`，会让 token 发到那个主机。能改凭证文件的人通常已经能读 token。
-
-### 低 — 日志和标准输出会带上对话片段
-
-- `forward.py` 第 33 行记录 webhook 响应前 300 字
-- `forward.py` 第 205 行记录 `from_user_id`
-- `send.py` 第 25 行把 iLink 的整段响应打到标准输出（agent 记录里看得到）
-- `bind.py` 第 31 行打印二维码 URL
-
-成功路径的源码没有把 `bot_token` 写进日志。生产日志没读，不能证明历史上没有泄通过。图片模块自己不写 `forward.log`，错误信息是固定句子；`sendmessage` 被拒绝时只打印整数 `ret` / `errcode`。
-
-### 低 — 依赖没有锁定哈希
-
-`requirements.txt` 是 `cryptography>=41` 和 `qrcode[pil]>=7`，没有哈希，也没有单独的安装脚本。`qrcode[pil]` 会拉 Pillow，只给 `bind.py` 画二维码。图片发送没有新依赖。风险在 `pip install` 当时的包索引，不在这次 diff。
-
-### 低 — 看门狗按命令行杀掉本目录的 `forward.py`
-
-`watchdog.sh` 第 35–36 行：`pgrep -f forward.py`，再比较进程的 cwd。cwd 不是这个目录的进程不会被杀。误伤限于把工作目录放在桥目录里、命令行又匹配 `forward.py` 的进程。生产机的 `run_forward.sh` 可能和仓库不同，这次没有那份脚本。
-
-### 低 — 文字的「被新消息取代」只查一次
-
-`send.py` 第 18–22 行在调用 `send_or_queue` 之前查 `last_inbound_ms > reply_to_ms + 500`。检查和真正 POST 之间没有第二次确认。图片在上传前和 `sendmessage` 前各查一次（`image_send.py` 里对 `check()` 的调用）。两次检查之后、TCP 送出之前的空隙仍然在，本地判断做不到和服务器原子。
-
-### 已排除：本仓库没有本地 HTTP 服务
-
-读过的 Python 和 shell 都是出站客户端。`poll.py` / `forward.py` 不会 listen。主机上还有没有别的端口，这次看不到。
-
-## 这次图片实现做了什么，还剩什么
-
-对照的是腾讯公开仓库 `Tencent/openclaw-weixin` 主分支上的 `docs/protocol_zh_CN.md`、`src/messaging/send.ts`、`src/cdn/upload.ts`、`src/cdn/cdn-upload.ts`、`src/cdn/aes-ecb.ts`、`src/cdn/cdn-url.ts`。实现选择与公开客户端一致的部分：AES-128-ECB + PKCS#7、`getuploadurl` 的 `media_type=1` 和 `no_need_thumb=true`、`aeskey` 用 hex、消息里 `media.aes_key` 是这段 hex 的 base64、`mid_size` 为密文长度、`encrypt_type=1`、CDN 只发 `application/octet-stream`。比公开客户端更严的部分写在下面，也可能导致实机发不出去。
-
-| 控制 | 代码 | 剩余问题 |
+| 调用 | 数据 | 凭证 |
 |---|---|---|
-| CDN 请求不带 `Authorization` | `image_send.py` `build_cdn_request` | API 的 `getuploadurl` / `sendmessage` 仍带 Bot token，这是协议要求 |
-| 上传 URL 只允许 https、默认主机 `novac2c.cdn.weixin.qq.com`，不跟随重定向 | `validate_cdn_url`、`_NoRedirect` | 腾讯若返回名单外的 CDN 主机会失败关闭。可用 `WECHAT_CDN_HOST_ALLOWLIST` 加精确主机名 |
-| 结果不明或业务拒绝不自动再 POST `sendmessage` | `send_started` 在请求前写入账本；超时记为 `ambiguous` | 账本文件丢了，或两台机器共用凭证但不共用账本，仍可能发重 |
-| 同一文件、同一绑定用户、同一个 `--reply-to-ms` 再执行会被拦住 | `image_send_ledger.json` 模式 600，不存密钥 | 换 `--idempotency-key` 或新的 `--reply-to-ms` 会再发。这是故意的 |
-| 失败不进 `outbox.json` | 图片代码不调用 `enqueue` | 文字路径的重试行为不变 |
-| 收件人只能是 `ilink_user_id` | `resolve_recipient` | 和 `send.py` 不同，避免图片跟着被污染的 `last_from` 走 |
-| 符号链接、非常规文件、扩展名与文件头不符、空文件、大于 20 MiB、凭证文件硬链接、含 `bot_token` 等标记 | `read_image_file` | 20 MiB 是本地上限，不是腾讯文档里的限额。通过校验的普通图片仍可被 agent 发出 |
-| `WECHAT_OUTBOUND_IMAGE=0` | `outbound_image_enabled` | 只影响 `send_image.py`，不影响 `send.py`，也不需要重启转发器 |
+| `get_bot_qrcode` / `get_qrcode_status` | 二维码标识，可能还有你写入的验证码 | 不带 Bot token |
+| `getupdates` | 同步游标 `get_updates_buf` | Bearer `bot_token` |
+| `sendmessage`（文字） | 文本、`to_user_id`、`context_token`、`client_id` | 同上 |
+| `getuploadurl`（图片） | 明文长度、MD5、密文长度、AES key 的 hex、收件人 | 同上 |
+| `sendmessage`（图片） | CDN 下载参数、hex 密钥的 base64、密文长度 | 同上 |
+| CDN 上传（图片） | 只有密文。`Content-Type: application/octet-stream` | **不带** Bot token（`image_send.py` `build_cdn_request`） |
+| CDN 下载（入站） | GET。自建 URL 时带 `encrypt_query_param` | 不带 Bot token |
 
-账本和异常文本不记录 AES key、上传参数或 token。假网络测试检查了泄漏字符串不会出现在异常和 traceback 里。
+预定发给你配置的 webhook（`forward.py` `post_webhook`）：
 
-## 利用前提（这些不是已经发生的攻击）
+- 这批微信消息的文本、类型、已解密文件的本地路径
+- `history.log` 最近 40 行
+- 媒体下载失败时的 `raw_items`（含 AES key 和 CDN 参数）——`forward.py` 第 99–101 行
+- 请求头里是 **webhook** 的 Bearer，不是微信 `bot_token`
+- 源码没有把 `credentials.json` 放进这个 JSON
 
-- 入站 `full_url` 能指向本机能访问的内网或 `file://`：需要能影响 `getupdates` 里的该字段。
-- webhook 收到别人不该看的对话：需要 URL 配错，或那个 endpoint 的访问范围比你以为的大。
-- 别的本机用户读到 `history.log`：需要目录权限和 umask 允许。
-- 文字重复发送：需要第一次请求其实成功，但客户端看到的是异常或非 JSON。
-- 图片发给错误的人：文字路径仍有这个结构；图片路径在 `--to` 不等于绑定 id 时会拒绝。
-- 模型被微信正文说服去发本地图片：需要 agent 执行该指示，且文件能通过图片校验。
+本地文件（不自动上传）：`credentials.json`、`state.json`、`history.log`、`pending.json`、`outbox.json`、`forward.log`、附件目录、图片账本。`.gitignore` 忽略了凭证、`.env`、状态、历史和日志。跟踪文件里的 token 是占位符（`credentials.example.json` 第 4 行，`.env.example` 第 5–7 行）。git hooks 只有 Git 自带的 `*.sample`，没有启用的外传 hook。
 
-## 这次看不到的运行时
+## 配置从哪里来，有没有作者留下的开关
 
-生产目录里的 `.venv`、改过的 `run_forward.sh`、真实 umask、数据目录权限、`WECHAT_WEBHOOK_URL` 指向哪里、有没有 `https_proxy`、谁能登录那台机器、ClawBot 是否只接收绑定用户的消息。`https_proxy` / `http_proxy` 会让 `urllib` 把 API 和 CDN 请求交给代理；图片上传没有单独关掉代理。凭证和原始聊天日志没有打开。
+- Webhook URL 和 key：环境变量，或代码目录下的 `.env`。`.env` **不会**覆盖已经存在的环境变量（`config.py` `_load_dotenv`）。key 也可以来自 `WECHAT_SECRETS_FILE` 指向的本地 JSON。
+- 没有内置的「更新检查」、没有 `exec` / `eval` / `importlib` 拉远程代码、没有安装脚本。`requirements.txt` 只有 `cryptography>=41` 和 `qrcode[pil]>=7`，没有哈希。
+- `run_forward.sh` 和 `watchdog.sh` 只在本地启动或重启 `forward.py`，没有 `curl` 或 `wget`。
+- 图片开关 `WECHAT_OUTBOUND_IMAGE` 只决定发不发图片，不增加目的地。
 
-## 来源，以及没有写成结论的账号风险
+## 不是作者地址、但代码仍可能连到别的主机
 
-- 本仓库是社区程序（`LICENSE` 版权 psylch，MIT）。协议注释指向 chihao.li 的拆解和 npm 包 `@tencent-weixin/openclaw-weixin`。现有 `ilink.py` 使用 `bot_agent: OpenClaw` 和 `channel_version: 2.4.9`，这是在模仿公开客户端的请求头，不是腾讯发行的这份代码。
-- 腾讯公开仓库 [Tencent/openclaw-weixin](https://github.com/Tencent/openclaw-weixin) 的中文 README 把官方能力描述为 OpenClaw 的微信渠道插件。本次读到的 README 没有写封号、也没有写「禁止第三方直接调用」。
-- [chihao.li 的 iLink 笔记](https://chihao.li/blog/en/wechat-clawbot-ilink-protocol)（页面日期 2026-03-22）写明 ClawBot 是带服务条款的官方功能，并且认为任何能发 HTTP 的程序都可以调用 iLink。同文写「目前只支持文字」。这和腾讯当前 `send.ts` / `upload.ts` 里的图片发送不一致，应以当前公开客户端为准，并把那句「只支持文字」视为过时。笔记里的示例 token 没有抄进本仓库。
-- 服务条款的正文没有取到。没有腾讯关于封号的原文，就不把封号写成这个审查的发现。
+这些不是「已经发现作者在收数据」，而是源码允许的条件路径：
 
-## 建议（本次代码没有顺手改这些）
+- `ilink.post` 和 webhook、入站下载用的是 `urllib.request.urlopen`。Python 3.12 对 POST 的 301/302/303 会跟到 `Location`，并且**保留 `Authorization`**，但不把 POST 正文拷到下一次请求（标准库 `urllib/request.py` 的 `redirect_request`）。因此：若微信或 webhook 的第一跳返回重定向，Bot token 或 webhook key 可能被带到 `Location` 那个主机；消息正文仍只送到第一跳。图片 CDN 上传拒绝重定向。
+- 入站 `full_url` 没有主机限制。它让桥去 GET 一个消息里给出的地址，不是把凭证文件传出去。
+- 扫码阶段的 `redirect_host` 没有白名单，但那个请求不带已有的 Bot token。
 
-1. 确认 webhook URL 属于你自己的 routine 之前，不要把桥指向一个拿不准的地址。
-2. 数据目录设为仅当前用户可读写。改生产启动脚本时只加 `umask 077`，不要整文件覆盖 `run_forward.sh`。
-3. 图片先保持 `WECHAT_OUTBOUND_IMAGE=0`，直到你明确要做一次真实试发。试发失败若退出码是 5，不要再跑同一条命令。
-4. routine 里把微信正文当成用户说的话，不要当成可以改写发送规则的指示。
-5. 以后若改入站：给 `media.full_url` 加 https 和主机限制；下载失败时不要把 `raw_items` 里的密钥 POST 出去；考虑文字发送也只允许绑定的 `ilink_user_id`。
+## 依赖
 
-## 本次验证
+本审查环境里的 `cryptography` 是系统包。它的 Python 源码里有文档用的 `https://` 链接，**没有** `urlopen` 或 `requests`。没审它的 OpenSSL 二进制。`qrcode` 和 Pillow 在这个环境里没装，所以没读它们的代码。生产 `.venv` 可能是另一套包，不在本次范围内。
 
-`python3 -m unittest discover -s tests -v`：34 项通过（原有离线测试加上 `tests/test_outbound_image.py`）。网络全部是假的。没有真实微信发送，也没有真实 CDN 上传。
+## 上线前要拦住的事
+
+- **不能**根据这次审查宣布生产那份拷贝没有外传。`/workspace/grokbot-wechat` 上改过的 `.venv` 和 `run_forward.sh` 没看到。这是宣称「正在跑的那份是安全的」之前的阻塞项。
+- 图片功能仍然不要真实发送、不要部署，直到使用者另行确认。阻塞原因是没做过真实微信/CDN 试验，**不是**因为发现了作者后门。
+- 启用或继续使用之前，在生产机器上核对（不要把值贴出来）：`WECHAT_WEBHOOK_URL` 是不是你自己的 Grok webhook；`credentials.json` 的 `baseurl` 是不是 `https://ilinkai.weixin.qq.com`；环境里有没有指向别人的 `https_proxy`。这三项目前都看不到。
+
+没有发现「必须先删掉某段作者接收端才能上线」的代码。
+
+## 这份审计没有覆盖、所以不能算排除
+
+生产目录的实际文件、它的 `.venv`、进程环境、代理、webhook 的真实值、已安装 wheel 的内容、以及腾讯会不会在响应当中重定向。静态阅读看不到运行之后才出现的流量。
