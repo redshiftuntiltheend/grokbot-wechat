@@ -13,7 +13,7 @@
 - `watchdog.sh`（本次没有改它；若生产版不同，保留生产版）
 - `.env`、`credentials.json`、`state.json`、`pending.json`、`outbox.json`、`history.log`、`forward.log`、`attachments/`
 
-本次没有改 `forward.py`、`poll.py`、`bind.py`、`ilink.py`、`outbox.py`、`send.py`、`media.py`。文字发送行为应保持原样。
+重定向修复改了 `ilink.py`、`forward.py`、`bind.py`（以及图片上传共用的拒绝跳转类）。`poll.py`、`outbox.py`、`send.py`、`media.py`、`watchdog.sh` 没有为这件事改行为。200 响应的文字发送逻辑不变。生产进程在有人把这些文件拷上去并自行重启之前，仍是旧代码。这次不重启。
 
 ## 需要放上的文件
 
@@ -22,7 +22,14 @@
 - `send_image.py`
 - `image_send.py`
 - `tests/test_outbound_image.py`
+- `tests/test_redirect_guard.py`
 - `SECURITY_REVIEW.md`（给人看的，转发器不读它）
+
+重定向修复还要换上这些已有文件（不要用仓库版本覆盖生产上改过的 `run_forward.sh`）：
+
+- `ilink.py`
+- `forward.py`
+- `bind.py`
 
 有改动、需要合并而不是整文件覆盖的：
 

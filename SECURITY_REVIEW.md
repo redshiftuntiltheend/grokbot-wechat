@@ -12,7 +12,7 @@
 
 1. 代码或依赖里被放进恶意的发送逻辑（这份源码里没看到；生产 `.venv` 没审到）。
 2. 你自己的配置把目的地指到别处（`WECHAT_WEBHOOK_URL`、代理、CDN 白名单）。这次读不到生产环境里的值。
-3. 登录响应、`baseurl`、入站 `full_url`，或 HTTP 重定向给出一个不是腾讯的地址。代码会跟随其中一部分。这不是作者写死的地址，也没有证据表明腾讯会把流量转到作者。
+3. 登录响应里的 `baseurl`、扫码 JSON 里的 `redirect_host`，或入站 `full_url` 指向别的主机。这些不是作者写死的地址。微信 API 和 webhook 的 **HTTP 重定向**已经在本仓库源码里拒绝，见下一节。生产进程还没换上这段代码。
 
 微信服务器和你配置的 Grok webhook 收到消息，是这条桥的用途，**不算**被作者偷走。下面把这两类分开。
 
@@ -20,13 +20,13 @@
 
 | 域名或目的地 | 分类 | 运行时会不会发用户数据 |
 |---|---|---|
-| `ilinkai.weixin.qq.com` | 预定接收方：微信 iLink。`bind.py` 第 10 行、`ilink.py` 第 29 行、`credentials.example.json` 的默认值 | 会。见下表。代码里的默认 API |
+| `ilinkai.weixin.qq.com` | 预定接收方：微信 iLink。`bind.py` 的默认 `BASE`、`ilink.py` 第 50 行、`credentials.example.json` 的默认值 | 会。见下表。代码里的默认 API |
 | `novac2c.cdn.weixin.qq.com` | 预定接收方：微信 CDN。`media.py` 第 5 行、`image_send.py` 第 23–24 行 | 会。入站下载密文；出站只上传图片密文，不带 Bot token |
 | `WECHAT_WEBHOOK_URL` | 预定接收方，**仅当**它是你自己的 Grok routine。代码没有默认 URL，也没有网址白名单（`config.py` 第 31 行） | 会，发到你填的地址。未设置则不发（`forward.py` 第 22–25 行） |
 | `psylch/grokbot-wechat`、`chihao.li`、`Tencent/openclaw-weixin` | 文档和注释里的链接。README 第 148 行是给人看的 clone 地址 | **不会。** 桥进程不请求这些域名 |
 | `github.com/redshiftuntiltheend/grokbot-wechat` | 这个工作区的 git remote，只在 `git push` 时用到 | 桥进程不使用。push 出去的是源码，不是聊天记录 |
-| 凭证里的 `baseurl` | 登录响应写进 `credentials.json` 之后，`ilink.py` 第 29 行原样使用 | 若该值和默认不同，API 和 Bot token 会发到那个主机。源码没把它写成作者的域名 |
-| `redirect_host` | 扫码状态里的字段。`bind.py` 第 52–53 行拼成 `https://` + 主机 | 只会把二维码轮询发过去。这一步的请求头不含 `Authorization`（`bind.py` 第 12–13 行） |
+| 凭证里的 `baseurl` | 登录响应写进 `credentials.json` 之后，`ilink.py` 第 50 行原样使用 | 若该值和默认不同，API 和 Bot token 会发到那个主机。源码没把它写成作者的域名 |
+| `redirect_host` | 扫码状态里的字段。`bind.py` 第 53–54 行拼成 `https://` + 主机 | 只会把二维码轮询发过去。这一步的请求头不含 `Authorization`（`bind.py` 第 13–14 行） |
 | 入站 `media.full_url` | 消息里带来的 URL。`media.py` 第 39–47 行原样 `urlopen` | 会向该 URL 发 GET。不附带凭证文件。URL 本身来自消息 |
 | `upload_full_url` | `getuploadurl` 的返回值。图片路径只接受允许列表里的 https 主机，并拒绝重定向 | 不在名单里就不会 POST 密文 |
 | `WECHAT_CDN_BASE` / `WECHAT_CDN_HOST_ALLOWLIST` | 运行环境覆盖，默认仍是上面的微信 CDN | 只有运行者自己改了才会扩大 |
@@ -52,7 +52,7 @@
 
 - 这批微信消息的文本、类型、已解密文件的本地路径
 - `history.log` 最近 40 行
-- 媒体下载失败时的 `raw_items`（含 AES key 和 CDN 参数）——`forward.py` 第 99–101 行
+- 媒体下载失败时的 `raw_items`（含 AES key 和 CDN 参数）——`forward.py` 第 102–104 行
 - 请求头里是 **webhook** 的 Bearer，不是微信 `bot_token`
 - 源码没有把 `credentials.json` 放进这个 JSON
 
@@ -65,13 +65,26 @@
 - `run_forward.sh` 和 `watchdog.sh` 只在本地启动或重启 `forward.py`，没有 `curl` 或 `wget`。
 - 图片开关 `WECHAT_OUTBOUND_IMAGE` 只决定发不发图片，不增加目的地。
 
-## 不是作者地址、但代码仍可能连到别的主机
+## 已在本仓库源码修好的重定向
 
-这些不是「已经发现作者在收数据」，而是源码允许的条件路径：
+本机用假服务复现了漏洞：Python 3.12 的 `urllib.request.urlopen` 对 POST 的 **301 / 302 / 303** 会请求 `Location`，并带上原来的 `Authorization`。消息正文不会拷到第二跳。**307 / 308** 在这个版本里对 POST 不跟随，但会把正文留在第一跳。
 
-- `ilink.post` 和 webhook、入站下载用的是 `urllib.request.urlopen`。Python 3.12 对 POST 的 301/302/303 会跟到 `Location`，并且**保留 `Authorization`**，但不把 POST 正文拷到下一次请求（标准库 `urllib/request.py` 的 `redirect_request`）。因此：若微信或 webhook 的第一跳返回重定向，Bot token 或 webhook key 可能被带到 `Location` 那个主机；消息正文仍只送到第一跳。图片 CDN 上传拒绝重定向。
-- 入站 `full_url` 没有主机限制。它让桥去 GET 一个消息里给出的地址，不是把凭证文件传出去。
-- 扫码阶段的 `redirect_host` 没有白名单，但那个请求不带已有的 Bot token。
+本仓库现在默认拒绝这些跳转，第二跳收不到 `Authorization`、正文或其他敏感字段：
+
+- 微信 API：`ilink.py` `urlopen_no_redirect`（第 32–41 行），`post()` 第 52 行使用它
+- Webhook：`forward.py` 第 31–36 行。拒绝后只记状态码，不重试，不把 `Location` 写进日志
+- 扫码 HTTP：`bind.py` 第 22 行。验证码留在第一跳的 URL 里，不会跟到别的主机
+- 图片上传：沿用同一个 `NoRedirect`（`image_send.py` 里的 `_NoRedirect`）
+
+这只改了**这份源码**。正在跑的生产进程、它的 `.venv` 和生产上的 `run_forward.sh` 都没有被替换，也没有重启。不能说生产副本已经修好。
+
+若微信或 webhook 真的用 3xx 做正常跳转，现在会失败关闭，而不是跟着走。文字发送若因此抛错，仍会按原有逻辑进入 `outbox.json` 再试**原来的 URL**，不会去试跳转目标。
+
+## 仍可能连到别的主机（不是作者写死的地址）
+
+- 入站下载仍用 `urllib.request.urlopen`（`media.py` 第 46 行），会跟随重定向。这个请求**不带** `Authorization`。`full_url` 仍没有主机白名单。这次没有改它。
+- 扫码 JSON 的 `redirect_host`（`bind.py` 第 53–54 行）仍会改下一轮轮询的主机。那是协议字段，不是 HTTP `Location`。那个请求不带 Bot token。
+- `http_proxy` / `https_proxy` 仍会被 `urllib` 使用。代理不在这次修复里，生产环境有没有代理也没看到。
 
 ## 依赖
 
@@ -87,4 +100,4 @@
 
 ## 这份审计没有覆盖、所以不能算排除
 
-生产目录的实际文件、它的 `.venv`、进程环境、代理、webhook 的真实值、已安装 wheel 的内容、以及腾讯会不会在响应当中重定向。静态阅读看不到运行之后才出现的流量。
+生产目录的实际文件、它的 `.venv`、进程环境、代理、webhook 的真实值、已安装 wheel。重定向修复没有装进那个目录。静态阅读和本机假服务不能代替对正在运行的进程的检查，也不能说整体没有风险。

@@ -7,7 +7,7 @@ Three threads:
   outbox   flush queued sends right after the user writes; keep-alive nudge before the ~24h window closes
 Usage: python3 forward.py [--selftest]"""
 import json, os, socket, sys, threading, time, logging, urllib.request, urllib.error
-from ilink import post, load_state, save_state, DIR
+from ilink import post, load_state, save_state, DIR, urlopen_no_redirect, RedirectRefused
 import config, media, history, outbox
 from config import WEBHOOK_URL, webhook_key, OWNER_NAME
 
@@ -28,10 +28,13 @@ def post_webhook(payload, tries=5):
         try:
             req = urllib.request.Request(WEBHOOK_URL, data=data, method="POST",
                 headers={"Content-Type": "application/json", "Authorization": "Bearer " + key})
-            with urllib.request.urlopen(req, timeout=20) as f:
+            with urlopen_no_redirect(req, timeout=20) as f:
                 body = f.read().decode(errors="replace")
                 log.info("webhook OK status=%s body=%s", f.status, body[:300])
                 return f.status, body
+        except RedirectRefused as e:
+            log.warning("webhook redirect refused (HTTP %s)", e.status)
+            return None
         except urllib.error.HTTPError as e:
             body = e.read().decode(errors="replace")[:300]
             log.warning("webhook HTTP %s (try %d): %s", e.code, i + 1, body)

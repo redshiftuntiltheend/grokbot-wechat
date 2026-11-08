@@ -1,7 +1,7 @@
 """Minimal WeChat ClawBot iLink client.
 Protocol notes: https://chihao.li/blog/en/wechat-clawbot-ilink-protocol and the
 @tencent-weixin/openclaw-weixin 2.4.9 npm package (headers / base_info mimic that client)."""
-import base64, json, os, random, secrets, urllib.request
+import base64, json, os, random, secrets, urllib.error, urllib.request
 from config import DATA_DIR
 DIR = DATA_DIR
 CRED = os.path.join(DIR, "credentials.json")   # written by bind.py; NEVER commit
@@ -19,6 +19,27 @@ def save_state(s):
     with open(tmp, "w") as f: json.dump(s, f, indent=2, ensure_ascii=False)
     os.chmod(tmp, 0o600); os.replace(tmp, STATE)
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Do not follow HTTP redirects. urllib copies Authorization onto 301/302/303."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
+
+class RedirectRefused(Exception):
+    def __init__(self, status):
+        self.status = int(status)
+        super().__init__("redirect refused (HTTP %s)" % self.status)
+
+def urlopen_no_redirect(req, timeout):
+    """Open req and refuse every 3xx. The error text does not include Location or secrets."""
+    opener = urllib.request.build_opener(NoRedirect)
+    try:
+        return opener.open(req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        code = getattr(e, "code", None)
+        if isinstance(code, int) and not isinstance(code, bool) and 300 <= code < 400:
+            raise RedirectRefused(code) from None
+        raise
+
 def post(endpoint, body, timeout=15):
     c = creds()
     hdrs = {"Content-Type": "application/json", "AuthorizationType": "ilink_bot_token",
@@ -28,7 +49,7 @@ def post(endpoint, body, timeout=15):
     body = dict(body, base_info=BASE_INFO)
     url = (c.get("baseurl") or "https://ilinkai.weixin.qq.com").rstrip("/") + "/" + endpoint
     r = urllib.request.Request(url, data=json.dumps(body, ensure_ascii=False).encode(), headers=hdrs, method="POST")
-    with urllib.request.urlopen(r, timeout=timeout) as f:
+    with urlopen_no_redirect(r, timeout=timeout) as f:
         return f.read().decode()
 
 def send_text(text, to=None, context_token=None):

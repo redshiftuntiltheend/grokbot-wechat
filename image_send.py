@@ -307,9 +307,7 @@ def _header(headers, name):
         value = value[0] if value else ""
     return "" if value is None else str(value).strip()
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
+_NoRedirect = ilink.NoRedirect
 
 def _opener():
     return urllib.request.build_opener(_NoRedirect)

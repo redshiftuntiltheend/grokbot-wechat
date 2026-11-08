@@ -347,9 +347,9 @@ class ImageSendTest(unittest.TestCase):
     def test_real_cdn_request_has_no_authorization_even_if_api_does(self):
         token = "bot-token-TEST-DO-NOT-LEAK"
         captured = []
-        orig_urlopen, orig_creds = urllib.request.urlopen, ilink.creds
+        orig_open, orig_creds = ilink.urlopen_no_redirect, ilink.creds
 
-        def fake_urlopen(req, timeout=None):
+        def fake_open(req, timeout=None):
             captured.append(req)
 
             class R:
@@ -364,14 +364,14 @@ class ImageSendTest(unittest.TestCase):
 
             return R()
 
-        urllib.request.urlopen = fake_urlopen
+        ilink.urlopen_no_redirect = fake_open
         ilink.creds = lambda: {"bot_token": token, "baseurl": "https://ilinkai.weixin.qq.com", "ilink_user_id": OWNER}
         try:
             ilink.post("ilink/bot/getuploadurl", {"filekey": "abc"})
             opener = ScriptedOpener([(200, {"x-encrypted-param": "enc"}, b"")])
             image_send.cdn_exchange(FULL, b"ciphertext-bytes", 5, opener=opener)
         finally:
-            urllib.request.urlopen, ilink.creds = orig_urlopen, orig_creds
+            ilink.urlopen_no_redirect, ilink.creds = orig_open, orig_creds
         api_headers = dict((k.lower(), v) for k, v in captured[0].header_items())
         self.assertIn(token, api_headers.get("authorization", ""))
         cdn_req = opener.reqs[0]
